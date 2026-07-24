@@ -90,6 +90,8 @@ func TestWithExplicitRootPath(t *testing.T) {
 }
 
 func TestRunProxyReturnsHealthListenerBindError(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -98,6 +100,7 @@ func TestRunProxyReturnsHealthListenerBindError(t *testing.T) {
 
 	runErr := runProxy(context.Background(), []string{
 		"--endpoint", "database.example.com:5432",
+		"--region", "us-east-1",
 		"--listen", "127.0.0.1:0",
 		"--health-address", occupied.Addr().String(),
 	})
