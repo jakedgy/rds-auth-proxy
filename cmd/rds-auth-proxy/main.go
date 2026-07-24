@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -112,8 +113,16 @@ func runToken(ctx context.Context, arguments []string) error {
 	if err != nil {
 		return fmt.Errorf("build authentication token: %w", err)
 	}
-	fmt.Println(token)
+	fmt.Println(withExplicitRootPath(token))
 	return nil
+}
+
+func withExplicitRootPath(token string) string {
+	queryStart := strings.IndexByte(token, '?')
+	if queryStart <= 0 || token[queryStart-1] == '/' {
+		return token
+	}
+	return token[:queryStart] + "/" + token[queryStart:]
 }
 
 func healthHandler() http.Handler {

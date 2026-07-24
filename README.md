@@ -23,6 +23,15 @@ export PGPASSWORD="$(./rds-auth-proxy token \
 psql 'host=127.0.0.1 port=5432 user=app dbname=app sslmode=require'
 ```
 
+Aurora PostgreSQL clusters created with express configuration route internet
+gateway connections using TLS SNI. With a PostgreSQL 17 or newer client, keep
+the Aurora endpoint as `host` for SNI, use `hostaddr` for the local proxy
+connection, and enable direct TLS negotiation:
+
+```sh
+psql 'host=my-cluster.cluster-abc.us-east-1.rds.amazonaws.com hostaddr=127.0.0.1 port=5432 user=app dbname=app sslmode=require sslnegotiation=direct'
+```
+
 The local leg is plaintext and therefore listens on loopback by default. `/healthz` is served on `127.0.0.1:9090`; pass an empty `--health-address` to disable it. IAM database authentication must be enabled on the database, and the AWS identity needs `rds-db:connect` for the database user.
 
 ## Direction
