@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -85,5 +86,25 @@ func TestWithExplicitRootPath(t *testing.T) {
 				t.Fatalf("withExplicitRootPath(%q) = %q, want %q", test.token, got, test.want)
 			}
 		})
+	}
+}
+
+func TestRunProxyReturnsHealthListenerBindError(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+
+	runErr := runProxy(context.Background(), []string{
+		"--endpoint", "database.example.com:5432",
+		"--listen", "127.0.0.1:0",
+		"--health-address", occupied.Addr().String(),
+	})
+	if runErr == nil {
+		t.Fatal("runProxy() returned nil, want health listener bind error")
+	}
+	if !strings.Contains(runErr.Error(), "health") {
+		t.Fatalf("runProxy() error = %q, want health listener context", runErr)
 	}
 }

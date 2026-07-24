@@ -74,24 +74,44 @@ func runProxy(parent context.Context, arguments []string) error {
 
 	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if *healthAddress != "" {
-		server := &http.Server{Addr: *healthAddress, Handler: healthHandler(), ReadHeaderTimeout: 2 * time.Second}
-		go func() {
-			<-ctx.Done()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = server.Shutdown(shutdownCtx)
-		}()
-		go func() {
-			if serveErr := server.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-				slog.Error("health server failed", "error", serveErr)
-				stop()
-			}
-		}()
+	if *healthAddress == "" {
+		slog.Info("proxy listening", "listen", listener.Addr(), "endpoint", *endpoint)
+		return proxy.Serve(ctx, listener)
 	}
 
+	healthListener, err := net.Listen("tcp", *healthAddress)
+	if err != nil {
+		return fmt.Errorf("listen for health checks on %s: %w", *healthAddress, err)
+	}
+	defer healthListener.Close()
+
+	server := &http.Server{Handler: healthHandler(), ReadHeaderTimeout: 2 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	healthErrors := make(chan error, 1)
+	go func() {
+		if serveErr := server.Serve(healthListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			healthErrors <- serveErr
+		}
+	}()
+
+	proxyErrors := make(chan error, 1)
+	go func() {
+		proxyErrors <- proxy.Serve(ctx, listener)
+	}()
 	slog.Info("proxy listening", "listen", listener.Addr(), "endpoint", *endpoint)
-	return proxy.Serve(ctx, listener)
+	select {
+	case proxyErr := <-proxyErrors:
+		return proxyErr
+	case healthErr := <-healthErrors:
+		stop()
+		<-proxyErrors
+		return fmt.Errorf("serve health checks on %s: %w", *healthAddress, healthErr)
+	}
 }
 
 func runToken(ctx context.Context, arguments []string) error {
