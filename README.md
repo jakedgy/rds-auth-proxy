@@ -1,51 +1,78 @@
 # RDS Auth Proxy
 
-An early, deliberately small local connector for Amazon RDS and Aurora. It listens on a loopback TCP address and forwards each connection to the database endpoint without altering its database protocol. A companion command generates short-lived IAM database authentication tokens with the normal AWS credential chain.
-
-> [!IMPORTANT]
-> This is not yet a drop-in equivalent of Cloud SQL Auth Proxy. It does **not** authenticate the database protocol, inject a password, or terminate TLS. Supply the generated token to your PostgreSQL or MySQL client as its password and enable TLS in that client. The proxy's job in this first milestone is simple local addressing, token generation, and container health checks.
+A small PostgreSQL connector for Amazon RDS and Aurora. It uses the proxy
+process's ambient AWS identity to generate a fresh IAM database authentication
+token whenever a client opens a connection. Applications therefore do not need
+AWS credentials, a database password, or a separate token-generation step.
 
 ## Build and run
 
 ```sh
 go build -o rds-auth-proxy ./cmd/rds-auth-proxy
-./rds-auth-proxy proxy \
+./rds-auth-proxy \
   --endpoint my-cluster.cluster-abc.us-east-1.rds.amazonaws.com:5432 \
-  --listen 127.0.0.1:5432
+  --region us-east-1 \
+  --listen 127.0.0.1:5432 \
+  --tls-negotiation direct \
+  --root-ca global-bundle.pem
 ```
 
-Generate a token using credentials from environment variables, shared configuration, web identity (EKS IRSA), or another AWS SDK credential provider:
+The proxy loads credentials using the normal AWS SDK credential chain, including
+environment variables, shared configuration, web identity (EKS IRSA), and
+container credentials. The PostgreSQL startup packet supplies the database user,
+so no user is configured on the proxy. Connect `psql` directly, without setting
+`PGPASSWORD`:
 
 ```sh
-export PGPASSWORD="$(./rds-auth-proxy token \
-  --endpoint my-cluster.cluster-abc.us-east-1.rds.amazonaws.com:5432 \
-  --region us-east-1 --user app)"
-psql 'host=127.0.0.1 port=5432 user=app dbname=app sslmode=require'
+psql 'host=127.0.0.1 port=5432 user=app dbname=app sslmode=disable'
 ```
 
-Aurora PostgreSQL clusters created with express configuration route internet
-gateway connections using TLS SNI. With a PostgreSQL 17 or newer client, keep
-the Aurora endpoint as `host` for SNI, use `hostaddr` for the local proxy
-connection, and enable direct TLS negotiation:
+The local connection is deliberately plaintext so that the proxy can handle the
+PostgreSQL authentication exchange. It rejects client SSL and GSS encryption
+requests, establishes a separate verified TLS 1.2+ connection to RDS, and sends
+the newly generated token in response to RDS's cleartext-password authentication
+request. The token and application traffic are protected on the network-facing
+connection and tokens are never sent to or requested from the local client.
+
+`--root-ca` adds a PEM CA bundle to the system trust store. Use the current AWS
+RDS CA bundle when it is not already trusted by the host. Certificate verification
+always uses the RDS endpoint hostname; it is never disabled.
+
+The default `--tls-negotiation postgres` uses PostgreSQL's traditional SSL
+request. Set it to `direct` for Aurora configurations whose gateway requires a
+TLS ClientHello (and SNI) as the first upstream packet, including Aurora
+PostgreSQL express configurations. This option affects only the upstream leg.
+
+`/healthz` is served on `127.0.0.1:9090`; pass an empty `--health-address` to
+disable it. IAM database authentication must be enabled on the database, the
+PostgreSQL user must be configured for IAM authentication, and the proxy's AWS
+identity needs `rds-db:connect` for that user.
+
+## Legacy token command
+
+The standalone command remains available for diagnostics, although normal psql
+usage no longer needs it:
 
 ```sh
-psql 'host=my-cluster.cluster-abc.us-east-1.rds.amazonaws.com hostaddr=127.0.0.1 port=5432 user=app dbname=app sslmode=require sslnegotiation=direct'
+./rds-auth-proxy token \
+  --endpoint my-cluster.cluster-abc.us-east-1.rds.amazonaws.com:5432 \
+  --region us-east-1 --user app
 ```
-
-The local leg is plaintext and therefore listens on loopback by default. `/healthz` is served on `127.0.0.1:9090`; pass an empty `--health-address` to disable it. IAM database authentication must be enabled on the database, and the AWS identity needs `rds-db:connect` for the database user.
-
-## Direction
-
-The transport core is intentionally database-agnostic and suitable for a future EKS sidecar. Planned milestones are:
-
-1. PostgreSQL and MySQL protocol adapters that can inject refreshed IAM tokens.
-2. Structured readiness that checks endpoint reachability, metrics, and graceful connection draining.
-3. A Kubernetes mutating admission webhook that injects the proxy sidecar, uses workload identity, and defaults to a non-root security context.
-4. Endpoint discovery and failover-aware Aurora cluster connections.
 
 ## Security model
 
-* Database TLS is end-to-end and must be enabled in the client. Because the client connects to `localhost`, use the RDS CA bundle and appropriate client options if host-name verification is required.
-* The listener defaults to loopback to avoid exposing connections to other hosts.
-* Tokens are printed only on explicit request and are never written by the proxy or included in logs.
-* The proxy does not make a private RDS endpoint reachable by itself. Run it somewhere with VPC network connectivity, such as an EKS pod in the VPC.
+* The database-facing connection always uses verified TLS 1.2 or newer.
+* The local listener defaults to loopback. Keep it on a trusted network namespace;
+  any local process able to connect can request access as an IAM-enabled database
+  user authorized for the proxy's AWS identity.
+* A token is generated per connection and is neither logged nor exposed to the
+  PostgreSQL client.
+* The proxy does not make a private RDS endpoint reachable by itself. Run it with
+  VPC network connectivity, such as an EKS sidecar in the VPC.
+
+## Current scope
+
+This milestone supports PostgreSQL protocol version 3 and the cleartext-password
+authentication exchange used by RDS IAM authentication. MySQL, client-side TLS,
+PostgreSQL channel binding, endpoint discovery, and failover-aware cluster
+connections are not yet supported.
